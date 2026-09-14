@@ -113,7 +113,7 @@ func handleStrem(w http.ResponseWriter, r *http.Request) {
 			AddedAt: amRes.AddedAt,
 		}
 
-		magnet, err = stremio_shared.WaitForMagnetStatus(ctx, magnet, store.MagnetStatusDownloaded, 3, 5*time.Second)
+		magnet, err = stremio_shared.WaitForMagnetStatus(&ctx.Ctx, magnet, store.MagnetStatusDownloaded, 3, 5*time.Second)
 		if err != nil {
 			strem := &stremResult{
 				error_level: logger.LevelError,

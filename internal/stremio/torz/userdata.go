@@ -194,6 +194,9 @@ func getUserData(r *http.Request) (*UserData, error) {
 			return nil, err
 		}
 		if data.encoded == "" {
+			data.AutoIndexers = true
+			data.Sort = "-language:hi|dual audio|multi audio|en,-resolution,-quality,-size"
+			data.Filter = `(Resolution == "4k" || Resolution == "2160p" || Resolution == "1440p" || Resolution == "2k" || Resolution == "1080p" || Resolution == "")`
 			return data, nil
 		}
 	}

@@ -44,6 +44,10 @@ func (ws WrappedStream) GetHDR() string {
 	return strings.Join(ws.r.HDR, "|")
 }
 
+func (ws WrappedStream) GetLanguages() []string {
+	return ws.r.Languages
+}
+
 func (st StreamTransformer) Do(stream *stremio.Stream, sType string, tryReconfigure bool) (*WrappedStream, error) {
 	s := &WrappedStream{Stream: stream}
 

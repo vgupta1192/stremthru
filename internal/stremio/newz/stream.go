@@ -57,6 +57,10 @@ func (s WrappedStream) GetHDR() string {
 	return strings.Join(s.R.HDR, "|")
 }
 
+func (s WrappedStream) GetLanguages() []string {
+	return s.R.Languages
+}
+
 func matchesTitle(titles []string, parsedTitle string, normalizer *util.StringNormalizer) bool {
 	for _, title := range titles {
 		if util.MaxLevenshteinDistance(5, parsedTitle, title, normalizer) {

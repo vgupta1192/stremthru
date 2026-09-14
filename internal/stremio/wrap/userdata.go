@@ -71,6 +71,11 @@ type UserData struct {
 	ManifestURL string             `json:"manifest_url,omitempty"`
 
 	IncludeTorz bool `json:"torz,omitempty"`
+	// Added 2026-09-14: wrap's IncludeTorz previously only ever read
+	// already-cached torz results - it had no indexer list at all, so it
+	// never did a live Jackett search of its own. This lets it resolve
+	// indexers the same way the standalone torz addon does.
+	stremio_userdata.UserDataIndexers
 
 	stremio_userdata.UserDataStores
 	StoreName  string `json:"store,omitempty"`
@@ -97,6 +102,7 @@ type UserData struct {
 
 func (ud UserData) StripSecrets() UserData {
 	ud.UserDataStores = ud.UserDataStores.StripSecrets()
+	ud.UserDataIndexers = ud.UserDataIndexers.StripSecrets()
 	ud.StoreToken = ""
 	ud.RPDBAPIKey = ""
 	ud.TopPostersAPIKey = ""
@@ -169,6 +175,7 @@ type userDataError struct {
 	upstreamUrl      []string
 	store            []string
 	token            []string
+	indexerURL       []string
 	rpdb_akey        string
 	top_posters_akey string
 }
@@ -213,6 +220,18 @@ func (uderr *userDataError) Error() string {
 		hasSome = true
 
 	}
+	for i, err := range uderr.indexerURL {
+		if err == "" {
+			continue
+		}
+		if hasSome {
+			str.WriteString(", ")
+			hasSome = false
+		}
+		str.WriteString("indexer_url[" + strconv.Itoa(i) + "]: ")
+		str.WriteString(err)
+		hasSome = true
+	}
 	return str.String()
 }
 
@@ -251,7 +270,7 @@ func (ud *UserData) GetRequestContext(r *http.Request) (*Ctx, error) {
 		return ctx, udErr
 	}
 
-	if err, errField := ud.UserDataStores.Prepare(ctx); err != nil {
+	if err, errField := ud.UserDataStores.Prepare(&ctx.Ctx); err != nil {
 		switch errField {
 		case "store":
 			udErr.store = []string{err.Error()}
@@ -264,6 +283,15 @@ func (ud *UserData) GetRequestContext(r *http.Request) (*Ctx, error) {
 	}
 
 	ctx.ClientIP = shared.GetClientIP(r, &ctx.Context)
+
+	if ud.IncludeTorz {
+		if indexers, err := ud.UserDataIndexers.Prepare(); err != nil {
+			udErr.indexerURL = []string{err.Error()}
+			return ctx, udErr
+		} else {
+			ctx.Indexers = indexers
+		}
+	}
 
 	return ctx, nil
 }
@@ -446,6 +474,22 @@ func getUserData(r *http.Request) (*UserData, error) {
 
 	if IsMethod(r, http.MethodGet) || IsMethod(r, http.MethodHead) {
 		if data.GetEncoded() == "" {
+			// Confirmed live (2026-09-14): a brand-new config previously
+			// started completely blank - no indexers (so IncludeTorz could
+			// never do a live Jackett search), no Torrentio upstream, no
+			// sort/filter - requiring several manual steps most users never
+			// discovered, silently leaving them on a config that only ever
+			// showed whatever was already cached. Defaulting a new config
+			// to "everything on, just pick your debrid stores" so the two
+			// separately-generated URLs from before this change collapse
+			// into a single one that already does both.
+			data.IncludeTorz = true
+			data.AutoIndexers = true
+			data.Upstreams = []UserDataUpstream{
+				{URL: "https://torrentio.strem.fun/manifest.json", ReconfigureStore: true, ExtractorId: BUILTIN_TRANSFORMER_ENTITY_ID_PREFIX + "Torrentio"},
+			}
+			data.Sort = "-language:hi|dual audio|multi audio|en,-resolution,-quality,-size"
+			data.Filter = `(Resolution == "4k" || Resolution == "2160p" || Resolution == "1440p" || Resolution == "2k" || Resolution == "1080p" || Resolution == "")`
 			return data, nil
 		}
 

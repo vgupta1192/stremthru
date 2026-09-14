@@ -34,7 +34,11 @@ type Client struct {
 
 func NewClient(conf *ClientConfig) *Client {
 	if conf.HTTPClient == nil {
-		conf.HTTPClient = config.GetHTTPClient(config.TUNNEL_TYPE_AUTO)
+		// Jackett is always a same-box/first-party service, never routed
+		// through Tunnel/StoreTunnel - safe to keep connections alive
+		// (see config.GetLocalHTTPClient's doc comment for why this
+		// differs from the debrid/tracker-facing default).
+		conf.HTTPClient = config.GetLocalHTTPClient()
 	}
 
 	if conf.UserAgent == "" {

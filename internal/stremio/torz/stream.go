@@ -62,6 +62,10 @@ func (s WrappedStream) GetHDR() string {
 	return strings.Join(s.R.HDR, "|")
 }
 
+func (s WrappedStream) GetLanguages() []string {
+	return s.R.Languages
+}
+
 type indexerSearchQueryMeta struct {
 	titles     []string
 	year       int

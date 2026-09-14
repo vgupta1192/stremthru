@@ -96,9 +96,17 @@ func RehashIfNeeded(info *NZBInfo) error {
 
 var nzbFileFetchSG singleflight.Group
 
+// Confirmed live (2026-09-13): fetching the raw .nzb XML for a very large
+// release (a 2160p REMUX's NZB alone was 14.2MB - tens of thousands of
+// segment references) took 15.8s on a clean try, and genuinely exceeded
+// 60s at least once under this host's typical heavy load, producing
+// "context deadline exceeded (Client.Timeout exceeded while awaiting
+// headers)" and killing the download job immediately - the proximate
+// cause of "failed to download" for large titles. Raised to give large
+// NZBs real headroom without touching the per-segment NNTP timeouts.
 var defaultNZBFileFetcher = func() *http.Client {
 	client := config.GetHTTPClient(config.TUNNEL_TYPE_NEWZ_NZB_GRAB)
-	client.Timeout = 60 * time.Second
+	client.Timeout = 120 * time.Second
 	return client
 }()
 

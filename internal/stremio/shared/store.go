@@ -38,6 +38,23 @@ func GetStoreCodeOptions(includeP2P bool) []configure.ConfigOption {
 	return options
 }
 
+// nextPollDelay ramps up from 1s, doubling each retry, capped at
+// retryInterval. A magnet/newz that's already effectively cached on the
+// store's side usually flips to the target status within a second or two
+// of AddMagnet/AddNewz - polling at a flat retryInterval (previously a
+// hardcoded 5s for magnets) meant the common "basically instant" case
+// still paid the full interval before the first recheck. Ramping keeps
+// the same total worst-case patience budget (maxRetry*retryInterval is
+// still the ceiling once the delay saturates at retryInterval) while
+// resolving the common fast case in ~1-2s instead of a flat 5s+.
+func nextPollDelay(retry int, retryInterval time.Duration) time.Duration {
+	delay := time.Second << retry
+	if delay > retryInterval || delay <= 0 {
+		delay = retryInterval
+	}
+	return delay
+}
+
 func WaitForMagnetStatus(ctx *Ctx, m *store.GetMagnetData, status store.MagnetStatus, maxRetry int, retryInterval time.Duration) (*store.GetMagnetData, error) {
 	// most stores only populate Private in AddMagnet (derived from the torrent
 	// metainfo), not in GetMagnet, so carry the incoming value across refreshes.
@@ -56,7 +73,10 @@ func WaitForMagnetStatus(ctx *Ctx, m *store.GetMagnetData, status store.MagnetSt
 		m = magnet
 		private = private || m.Private
 		m.Private = private
-		time.Sleep(retryInterval)
+		if m.Status == status {
+			break
+		}
+		time.Sleep(nextPollDelay(retry, retryInterval))
 		retry++
 	}
 	if m.Status != status {
@@ -79,9 +99,27 @@ func GetStoreCodeOptionsForNewz() []configure.ConfigOption {
 	return options
 }
 
+func isTerminalFailedNewzStatus(status store.NewzStatus) bool {
+	switch status {
+	case store.NewzStatusFailed, store.NewzStatusInvalid, store.NewzStatusUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// Confirmed live (2026-09-13): this loop only checked for the target status,
+// never for a terminal failure - so a genuinely failed/invalid NZB polled
+// for the *entire* maxRetry budget before returning an error, exactly
+// backwards from the intent (fail fast, wait patiently for real progress).
+// Combined with PlaybackWaitTime previously defaulting to 5s (maxRetry=1
+// at the usual 5s retryInterval), a click on a title that was still
+// downloading got almost no chance to finish before falling back to the
+// "downloading" placeholder video, requiring a manual re-click once the
+// download had actually completed in the background.
 func WaitForNewzStatus(ctx *Ctx, data *store.GetNewzData, status store.NewzStatus, maxRetry int, retryInterval time.Duration) (*store.GetNewzData, error) {
 	retry := 0
-	for data.Status != status && retry < maxRetry {
+	for data.Status != status && !isTerminalFailedNewzStatus(data.Status) && retry < maxRetry {
 		params := &store.GetNewzParams{
 			Id:       data.Id,
 			ClientIP: ctx.ClientIP,
@@ -92,7 +130,10 @@ func WaitForNewzStatus(ctx *Ctx, data *store.GetNewzData, status store.NewzStatu
 			return data, err
 		}
 		data = newz
-		time.Sleep(retryInterval)
+		if data.Status == status || isTerminalFailedNewzStatus(data.Status) {
+			break
+		}
+		time.Sleep(nextPollDelay(retry, retryInterval))
 		retry++
 	}
 	if data.Status != status {

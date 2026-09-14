@@ -1,6 +1,7 @@
 package stremio_wrap
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/url"
@@ -101,6 +102,32 @@ func (ud UserData) fetchStream(ctx *Ctx, r *http.Request, rType, id string) (*st
 			if err != nil {
 				errs[0] = err
 				return
+			}
+
+			// Added 2026-09-14: previously this only ever read already-cached
+			// results - wrap had no indexer list at all, so it could never do
+			// a live Jackett search of its own for the torz-included portion,
+			// unlike the standalone torz addon. Runs the same live search
+			// torz itself does, merged in alongside the cache read.
+			//
+			// skip_live=1 lets a caller opt out of this specific step (added
+			// for catalog_warmer.py: it only exists to "click" a title so
+			// the background sync job above gets queued and cache-fill
+			// happens - it was never the one needing live results itself,
+			// but paying for a full live search on every one of its ~3000
+			// requests made its own daily sweep slower and added real
+			// contention against genuine concurrent user requests for no
+			// benefit, since the queued sync job runs and fills cache either
+			// way, live search or not).
+			if len(ctx.Indexers) > 0 && r.URL.Query().Get("skip_live") != "1" {
+				timeoutCtx, cancel := context.WithTimeout(r.Context(), config.Stremio.Torz.IndexerMaxTimeout)
+				liveStreams, _, liveErr := stremio_torz.GetStreamsFromIndexers(timeoutCtx, &stremio_torz.Ctx{Ctx: ctx.Ctx, Indexers: ctx.Indexers}, rType, stremId)
+				cancel()
+				if liveErr != nil {
+					log.Error("failed to fetch live torz streams", "error", liveErr)
+				} else {
+					streams = append(streams, liveStreams...)
+				}
 			}
 
 			wstreams := make([]WrappedStream, len(streams))

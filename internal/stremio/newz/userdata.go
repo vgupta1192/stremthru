@@ -260,6 +260,15 @@ func getUserData(r *http.Request) (*UserData, error) {
 			return nil, err
 		}
 		if data.encoded == "" {
+			// Matches the same sort/filter defaults applied to brand-new
+			// torz/wrap configs 2026-09-14. The one required indexer entry
+			// (StremThru) is deliberately left for manual add - unlike
+			// torz's Jackett list, it's a single "+ Add Indexer" click with
+			// Type set to StremThru, and auto-filling it here would need
+			// resolving a per-install proxy-auth credential not safely
+			// knowable at this point in the request.
+			data.Sort = "-language:hi|dual audio|multi audio|en,-resolution,-quality,-size"
+			data.Filter = `(Resolution == "4k" || Resolution == "2160p" || Resolution == "1440p" || Resolution == "2k" || Resolution == "1080p" || Resolution == "")`
 			return data, nil
 		}
 	}

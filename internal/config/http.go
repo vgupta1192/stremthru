@@ -321,6 +321,35 @@ var DefaultHTTPClient = func() *http.Client {
 	}
 }()
 
+// LocalHTTPClient is for first-party, always-local traffic only (Jackett
+// on this same box, etc.) - NOT for anything that could go through
+// Tunnel/StoreTunnel's per-request proxy routing (debrid APIs, tracker/
+// content downloads), where DefaultHTTPTransport's DisableKeepAlives=true
+// is deliberate: a request's effective proxy can differ call to call
+// based on destination host/store, and a reused pooled connection is keyed
+// to a specific dial target, so keep-alive is safe there too in principle,
+// but this box's local services never need that routing at all, making
+// keep-alive an unambiguous win with no correctness question to reason
+// about. Confirmed live: Jackett alone is queried up to ~23 times per
+// search plus every indexer-health-check.py run (now every 5 minutes) -
+// each request paying a fresh TCP handshake for a loopback connection was
+// pure overhead.
+var LocalHTTPTransport = func() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.MaxIdleConns = 100
+	transport.MaxIdleConnsPerHost = 25
+	transport.IdleConnTimeout = 90 * time.Second
+	return transport
+}()
+
+func GetLocalHTTPClient() *http.Client {
+	return &http.Client{
+		Transport: LocalHTTPTransport,
+		Timeout:   90 * time.Second,
+	}
+}
+
 func GetHTTPClient(tunnelType TunnelType) *http.Client {
 	transport := DefaultHTTPTransport.Clone()
 	transport.Proxy = Tunnel.GetProxy(tunnelType)

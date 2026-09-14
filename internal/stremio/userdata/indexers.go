@@ -75,6 +75,13 @@ func (i Indexer) Validate() (string, error) {
 
 type UserDataIndexers struct {
 	Indexers []Indexer `json:"indexers"`
+	// Added 2026-09-14: marks this config as managed by
+	// indexer_health_check.py, which keeps `Indexers` refreshed to the
+	// current fastest-healthy Jackett indexers every 5 minutes. A plain
+	// declared field (not an ad-hoc JSON key) so it survives every save
+	// through the Configure UI, which only round-trips fields the Go
+	// struct actually knows about. Defaults to true for brand-new configs.
+	AutoIndexers bool `json:"auto_indexers,omitempty"`
 }
 
 func (ud UserDataIndexers) HasRequiredValues() bool {

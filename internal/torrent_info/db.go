@@ -1206,8 +1206,19 @@ var query_list_hashes_by_stremid_from_imdb_torrent = fmt.Sprintf(
 	imdb_torrent.TableName,
 	imdb_torrent.Column.TId,
 )
+// Uses `||` rather than CONCAT(...) so a matching functional index can
+// exist at all: Postgres' built-in CONCAT() is marked STABLE (it accepts
+// arbitrary types whose text output can be locale/timezone-dependent),
+// which Postgres refuses for index expressions ("functions in index
+// expression must be marked IMMUTABLE") - `||` on two NOT NULL text
+// columns is IMMUTABLE and produces an identical result here, letting
+// idx_torrent_info_seasons_trgm/idx_torrent_info_episodes_trgm actually
+// get used instead of the query falling back to a per-row nested-loop
+// filter (confirmed live to take up to 185s on a popular, heavily-seeded
+// show under disk load - see torrent_info's own git history/commit
+// message from tonight for the full investigation).
 var query_list_hashes_by_stremid_from_imdb_torrent_for_series = fmt.Sprintf(
-	"SELECT ito.%s FROM %s ito JOIN %s ti ON ito.%s = ti.%s WHERE ito.%s = ? AND CONCAT(',', ti.%s, ',') LIKE ? AND (ti.%s = '' OR CONCAT(',', ti.%s, ',') LIKE ?)",
+	"SELECT ito.%s FROM %s ito JOIN %s ti ON ito.%s = ti.%s WHERE ito.%s = ? AND (',' || ti.%s || ',') LIKE ? AND (ti.%s = '' OR (',' || ti.%s || ',') LIKE ?)",
 	imdb_torrent.Column.Hash,
 	imdb_torrent.TableName,
 	TableName,

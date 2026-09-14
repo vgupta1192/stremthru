@@ -15,6 +15,12 @@ const (
 	StreamSortableFieldQuality    StreamSortableField = "quality"
 	StreamSortableFieldSize       StreamSortableField = "size"
 	StreamSortableFieldHDR        StreamSortableField = "hdr"
+	// language:<lang>|<lang>|... - ranks a stream by how early its best
+	// matching language appears in the given priority list (earlier =
+	// higher rank), without excluding anything: a stream whose language(s)
+	// don't match any entry in the list simply ranks 0 for this field and
+	// falls through to whatever sort field comes next, exactly like a tie.
+	StreamSortableFieldLanguage StreamSortableField = "language"
 )
 
 type StreamSortable interface {
@@ -22,6 +28,7 @@ type StreamSortable interface {
 	GetResolution() string
 	GetSize() string
 	GetHDR() string
+	GetLanguages() []string
 	IsSortable() bool
 }
 
@@ -114,6 +121,21 @@ func getHDRRank(input string) int64 {
 	return int64(len(input))
 }
 
+func getLanguageRank(languages []string, priority []string) int64 {
+	best := int64(0)
+	for _, lang := range languages {
+		lang = strings.ToLower(strings.TrimSpace(lang))
+		for i, p := range priority {
+			if lang == p {
+				if rank := int64(len(priority) - i); rank > best {
+					best = rank
+				}
+			}
+		}
+	}
+	return best
+}
+
 func getFieldRank(str StreamSortable, field StreamSortableField) int64 {
 	switch field {
 	case StreamSortableFieldResolution:
@@ -130,8 +152,9 @@ func getFieldRank(str StreamSortable, field StreamSortableField) int64 {
 }
 
 type StreamSorterConfig struct {
-	Field StreamSortableField
-	Desc  bool
+	Field            StreamSortableField
+	Desc             bool
+	LanguagePriority []string // only set when Field == StreamSortableFieldLanguage
 }
 
 func parseSortConfig(config string) []StreamSorterConfig {
@@ -139,7 +162,27 @@ func parseSortConfig(config string) []StreamSorterConfig {
 	for part := range strings.SplitSeq(config, ",") {
 		part = strings.TrimSpace(part)
 		desc := strings.HasPrefix(part, "-")
-		field := StreamSortableField(strings.TrimPrefix(part, "-"))
+		part = strings.TrimPrefix(part, "-")
+
+		if rest, ok := strings.CutPrefix(part, string(StreamSortableFieldLanguage)+":"); ok {
+			priority := []string{}
+			for _, lang := range strings.Split(rest, "|") {
+				lang = strings.ToLower(strings.TrimSpace(lang))
+				if lang != "" {
+					priority = append(priority, lang)
+				}
+			}
+			if len(priority) > 0 {
+				sortConfigs = append(sortConfigs, StreamSorterConfig{
+					Field:            StreamSortableFieldLanguage,
+					Desc:             desc,
+					LanguagePriority: priority,
+				})
+			}
+			continue
+		}
+
+		field := StreamSortableField(part)
 		switch field {
 		case StreamSortableFieldResolution, StreamSortableFieldQuality, StreamSortableFieldSize, StreamSortableFieldHDR:
 			sortConfigs = append(sortConfigs, StreamSorterConfig{Field: field, Desc: desc})
@@ -169,8 +212,14 @@ func (ss streamSorter[StreamSortable]) Less(a, b int) bool {
 	}
 
 	for _, config := range ss.config {
-		va := getFieldRank(aData, config.Field)
-		vb := getFieldRank(bData, config.Field)
+		var va, vb int64
+		if config.Field == StreamSortableFieldLanguage {
+			va = getLanguageRank(aData.GetLanguages(), config.LanguagePriority)
+			vb = getLanguageRank(bData.GetLanguages(), config.LanguagePriority)
+		} else {
+			va = getFieldRank(aData, config.Field)
+			vb = getFieldRank(bData, config.Field)
+		}
 
 		if va == vb {
 			continue
