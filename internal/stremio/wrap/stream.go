@@ -110,23 +110,61 @@ func (ud UserData) fetchStream(ctx *Ctx, r *http.Request, rType, id string) (*st
 			// unlike the standalone torz addon. Runs the same live search
 			// torz itself does, merged in alongside the cache read.
 			//
-			// skip_live=1 lets a caller opt out of this specific step (added
-			// for catalog_warmer.py: it only exists to "click" a title so
-			// the background sync job above gets queued and cache-fill
-			// happens - it was never the one needing live results itself,
-			// but paying for a full live search on every one of its ~3000
-			// requests made its own daily sweep slower and added real
-			// contention against genuine concurrent user requests for no
-			// benefit, since the queued sync job runs and fills cache either
-			// way, live search or not).
-			if len(ctx.Indexers) > 0 && r.URL.Query().Get("skip_live") != "1" {
-				timeoutCtx, cancel := context.WithTimeout(r.Context(), config.Stremio.Torz.IndexerMaxTimeout)
-				liveStreams, _, liveErr := stremio_torz.GetStreamsFromIndexers(timeoutCtx, &stremio_torz.Ctx{Ctx: ctx.Ctx, Indexers: ctx.Indexers}, rType, stremId)
-				cancel()
-				if liveErr != nil {
-					log.Error("failed to fetch live torz streams", "error", liveErr)
+			// skip_live=1 (added for catalog_warmer.py) was meant to opt out
+			// of only the *redundant* background refresh below, on the
+			// assumption that "the queued sync job runs and fills cache
+			// either way, live search or not" - but there is no other job:
+			// ListHashesByStremId/GetStreamsForHashes above are pure reads
+			// of already-crawled data, so for a title with zero existing
+			// hashes (a genuine first-ever search - the common case for
+			// long-tail/newly-added catalogue entries, not popular titles),
+			// the live search a few lines down is the *only* thing that
+			// ever populates the cache. The original code gated both
+			// branches on skip_live, so a warmer request for such a title
+			// took neither branch, came back with 0 streams, and got marked
+			// "warmed" anyway (see catalog_warmer.py's state.json, which
+			// then skips it for --refresh-days) - silently defeating the
+			// warmer for exactly the titles it most needs to pre-cache.
+			// Fixed by only gating the background-refresh branch (the
+			// truly redundant one, for titles that already have hashes) on
+			// skip_live; the synchronous first-ever-search branch always
+			// runs regardless, matching what its own comment below already
+			// promised.
+			if len(ctx.Indexers) > 0 {
+				// Confirmed live (2026-09-14): a 15-title real-world test
+				// showed several popular titles taking 45-60s+ because this
+				// live search ran and was waited on even when the cache
+				// read above had already turned up plenty of streams to
+				// show - the request was held hostage by a search it didn't
+				// need. If the cache already has something, return it
+				// immediately and run the live search detached in the
+				// background instead, purely to keep the cache fresh for
+				// next time; GetStreamsFromIndexers persists whatever it
+				// finds via its own `go torrent_info.Upsert(...)` regardless
+				// of whether anything reads its return value, so nothing is
+				// lost by not waiting on it here. A stremId with no cached
+				// hashes at all (first-ever search) still waits, since live
+				// search is the only source of results for that request.
+				if len(streams) > 0 {
+					if r.URL.Query().Get("skip_live") != "1" {
+						bgCtx := &stremio_torz.Ctx{Ctx: ctx.Ctx, Indexers: ctx.Indexers}
+						go func() {
+							timeoutCtx, cancel := context.WithTimeout(context.Background(), config.Stremio.Torz.IndexerMaxTimeout)
+							defer cancel()
+							if _, _, err := stremio_torz.GetStreamsFromIndexers(timeoutCtx, bgCtx, rType, stremId); err != nil {
+								log.Error("failed to fetch live torz streams (background refresh)", "error", err)
+							}
+						}()
+					}
 				} else {
-					streams = append(streams, liveStreams...)
+					timeoutCtx, cancel := context.WithTimeout(r.Context(), config.Stremio.Torz.IndexerMaxTimeout)
+					liveStreams, _, liveErr := stremio_torz.GetStreamsFromIndexers(timeoutCtx, &stremio_torz.Ctx{Ctx: ctx.Ctx, Indexers: ctx.Indexers}, rType, stremId)
+					cancel()
+					if liveErr != nil {
+						log.Error("failed to fetch live torz streams", "error", liveErr)
+					} else {
+						streams = append(streams, liveStreams...)
+					}
 				}
 			}
 
@@ -170,7 +208,11 @@ func (ud UserData) fetchStream(ctx *Ctx, r *http.Request, rType, id string) (*st
 				if err != nil {
 					errs[idx] = err
 				} else {
-					addonHostname := up.baseUrl.Hostname()
+					// .Host (not .Hostname()) so self-hosted upstreams on a
+					// non-default port (MediaFusion, 127.0.0.1:8210) are
+					// identified precisely - see the comment on
+					// mediaFusionHost in torrent_info/extractor.go.
+					addonHostname := up.baseUrl.Host
 					transformer := StreamTransformer{
 						Extractor: extractor,
 						Template:  template,
