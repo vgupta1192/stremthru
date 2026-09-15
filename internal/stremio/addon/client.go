@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/MunifTanjim/stremthru/core"
+	"github.com/MunifTanjim/stremthru/internal/cache"
 	"github.com/MunifTanjim/stremthru/internal/config"
 	"github.com/MunifTanjim/stremthru/internal/request"
 	"github.com/MunifTanjim/stremthru/internal/shared"
@@ -198,14 +199,44 @@ type FetchStreamParams struct {
 
 var fetchStreamGroup singleflight.Group
 
+// Unlike stremthru's own torz results (cached by hash in the magnet_cache/
+// torrent_info tables), a request for an upstream addon's (e.g. Torrentio)
+// stream response had no caching at all before this - singleflight only
+// dedupes truly concurrent in-flight requests, not repeat requests over
+// time, so every single stream open re-did a full live HTTP call to the
+// upstream addon regardless of how recently the same title was searched.
+// This is the main remaining reason a repeat search could still feel "live"
+// even after stremthru's own cache was warm and fixed. Short TTL (rather
+// than something closer to stremthru's own cache) because upstream addons
+// like Torrentio return their own debrid-backed stream URLs directly (not
+// just magnet hashes) - those can go stale on the upstream's own side, so
+// this favors staying fresh over maximizing hit rate. Only successful (200)
+// responses are cached; errors/timeouts always retry live next time.
+var fetchStreamCache = cache.NewCache[request.APIResponse[stremio.StreamHandlerResponse]](&cache.CacheConfig{
+	Name:     "stremio_addon:fetch_stream",
+	Lifetime: 7 * time.Minute,
+	MaxSize:  8192,
+})
+
 func (c Client) FetchStream(params *FetchStreamParams) (request.APIResponse[stremio.StreamHandlerResponse], error) {
 	path := "stream/" + params.Type + "/" + params.Id
 	url := params.BaseURL.JoinPath(path)
-	apiResponse, err, _ := fetchStreamGroup.Do(url.String(), func() (any, error) {
+	cacheKey := url.String()
+
+	var cached request.APIResponse[stremio.StreamHandlerResponse]
+	if fetchStreamCache.Get(cacheKey, &cached) {
+		return cached, nil
+	}
+
+	apiResponse, err, _ := fetchStreamGroup.Do(cacheKey, func() (any, error) {
 		adjustClientIPHeader(params.Ctx, params.ClientIP, nil)
 		response := &stremio.StreamHandlerResponse{}
 		res, err := c.Request("GET", url, params, response)
-		return request.NewAPIResponse(res, *response), err
+		apiResponse := request.NewAPIResponse(res, *response)
+		if err == nil && apiResponse.StatusCode == http.StatusOK {
+			fetchStreamCache.Add(cacheKey, apiResponse)
+		}
+		return apiResponse, err
 	})
 	return apiResponse.(request.APIResponse[stremio.StreamHandlerResponse]), err
 }
