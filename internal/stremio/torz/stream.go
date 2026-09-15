@@ -8,7 +8,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/MunifTanjim/stremthru/core"
@@ -234,13 +233,19 @@ func GetStreamsFromIndexers(reqCtx context.Context, ctx *Ctx, stremType, stremId
 		}
 	}
 
-	var wg sync.WaitGroup
+	// results/errs are written into by index from their own goroutine
+	// only, and never reassigned as a variable here - any goroutine still
+	// running past the partial wait below keeps writing safely into its
+	// own slot in these same original backing arrays. liveResults/
+	// liveQueries (built after the wait) are separate, freshly-allocated
+	// slices holding only the already-complete entries, so the rest of
+	// this function never reads an index that some other goroutine might
+	// still be concurrently writing.
 	results := make([][]tznc.Torz, len(sQueries))
 	errs := make([]error, len(sQueries))
+	completions := make(chan int, len(sQueries))
 	for i := range sQueries {
-		wg.Add(1)
 		go func(sq indexerSearchQuery, i int) {
-			defer wg.Done()
 			start := time.Now()
 			results[i], errs[i] = sq.indexer.Search(reqCtx, sq.query.Values())
 			if errs[i] == nil {
@@ -248,25 +253,67 @@ func GetStreamsFromIndexers(reqCtx context.Context, ctx *Ctx, stremType, stremId
 			} else {
 				log.Error("indexer search failed", "error", errs[i], "indexer", sq.indexer.GetId(), "query", sq.query.Encode(), "duration", time.Since(start).String())
 			}
+			completions <- i
 		}(sQueries[i], i)
 	}
-	wg.Wait()
+
+	// Confirmed live (2026-09-16): waiting for literally every dispatched
+	// query meant one indexer having a slow moment - a network blip, a
+	// site being briefly slow, a FlareSolverr queue - dragged every live
+	// search out to the full shared timeout, even with the rest
+	// responding in under a second. The "fastest N" indexer selection
+	// (indexer_health_check.py) only protects against a *permanently*
+	// slow indexer, not a transient one. Proceeding once most (80%) have
+	// reported back caps the typical wait to roughly the slowest-of-the-
+	// majority instead of the slowest-of-all, at the cost of occasionally
+	// missing one straggler's results for that one search - it still
+	// gets a normal chance on the next search (live or the existing
+	// background cache-refresh path for already-warm titles). This never
+	// waits *longer* than before: reqCtx's own deadline is still the hard
+	// ceiling either way.
+	minDone := (len(sQueries)*4 + 4) / 5 // ceil(80%)
+	if minDone < 1 {
+		minDone = 1
+	}
+	completed := make([]bool, len(sQueries))
+	doneCount := 0
+waitLoop:
+	for doneCount < minDone {
+		select {
+		case i := <-completions:
+			completed[i] = true
+			doneCount++
+		case <-reqCtx.Done():
+			break waitLoop
+		}
+	}
+
+	liveResults := make([][]tznc.Torz, 0, doneCount)
+	liveErrs := make([]error, 0, doneCount)
+	liveQueries := make([]indexerSearchQuery, 0, doneCount)
+	for i, done := range completed {
+		if done {
+			liveResults = append(liveResults, results[i])
+			liveErrs = append(liveErrs, errs[i])
+			liveQueries = append(liveQueries, sQueries[i])
+		}
+	}
 
 	realErrs := []error{}
-	for _, err := range errs {
+	for _, err := range liveErrs {
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			realErrs = append(realErrs, err)
 		}
 	}
 	if reqCtx.Err() != nil {
 		log.Warn("indexer search timed out, returning partial results")
-	} else if len(results) == 0 && len(realErrs) > 0 {
+	} else if len(liveResults) == 0 && len(realErrs) > 0 {
 		return nil, nil, errors.Join(realErrs...)
 	}
 
 	seenSourceURL := util.NewSet[string]()
 	torzFetchWg := torrentFetchPool.NewGroup()
-	for _, items := range results {
+	for _, items := range liveResults {
 		for i := range items {
 			item := &items[i]
 			if item.HasMissingData() && item.SourceLink != "" {
@@ -294,7 +341,7 @@ func GetStreamsFromIndexers(reqCtx context.Context, ctx *Ctx, stremType, stremId
 
 	hashSet := util.NewSet[string]()
 	hashes := []string{}
-	for _, items := range results {
+	for _, items := range liveResults {
 		for i := range items {
 			item := &items[i]
 			if item.HasMissingData() {
@@ -320,8 +367,8 @@ func GetStreamsFromIndexers(reqCtx context.Context, ctx *Ctx, stremType, stremId
 	strn := util.NewStringNormalizer()
 	tInfosToUpsert := []torrent_info.TorrentItem{}
 	wrappedStreams := []WrappedStream{}
-	for i, items := range results {
-		is_exact := sQueries[i].is_exact
+	for i, items := range liveResults {
+		is_exact := liveQueries[i].is_exact
 		for i := range items {
 			item := &items[i]
 			if item.HasMissingData() {
@@ -536,10 +583,48 @@ func GetStreamsFromIndexers(reqCtx context.Context, ctx *Ctx, stremType, stremId
 	return wrappedStreams, hashes, nil
 }
 
+// A handful of extremely popular titles (blockbusters like Oppenheimer,
+// confirmed live: 1158 known hashes) have so many known releases that
+// fetching per-file data for every single one becomes the bottleneck -
+// torrent_stream can hold 100+ file rows per hash (subs, samples, multiple
+// episodes in a season pack, etc.), so 1158 hashes meant a single request
+// aggregating well over 100,000 rows, confirmed live to take 60-90s+ even
+// with a warm torrent_info lookup. torrent_info itself (one row per hash,
+// already carrying parsed Seeders/Resolution/Languages) is cheap to fetch
+// and rank in full regardless of hash count - only the expensive
+// torrent_stream file lookup needs capping. Ranking by Seeders (a
+// standard, already-tracked proxy for a release actually being available/
+// healthy) and keeping the top N naturally favors well-seeded, commonly-
+// requested resolutions without needing a hardcoded resolution/language
+// allowlist that could silently hide something a user actually wants.
+const maxStreamsPerTitle = 100
+
 func GetStreamsForHashes(stremType, stremId string, hashes []string, nsid *torrent_stream.NormalizedStremId) ([]WrappedStream, error) {
 	tInfoByHash, err := torrent_info.GetByHashes(hashes)
 	if err != nil {
 		return nil, err
+	}
+
+	if len(tInfoByHash) > maxStreamsPerTitle {
+		ranked := make([]string, 0, len(tInfoByHash))
+		for hash := range tInfoByHash {
+			ranked = append(ranked, hash)
+		}
+		slices.SortFunc(ranked, func(a, b string) int {
+			return tInfoByHash[b].Seeders - tInfoByHash[a].Seeders
+		})
+		keep := make(map[string]torrent_info.TorrentInfo, maxStreamsPerTitle)
+		for _, hash := range ranked[:maxStreamsPerTitle] {
+			keep[hash] = tInfoByHash[hash]
+		}
+		tInfoByHash = keep
+		trimmedHashes := make([]string, 0, len(hashes))
+		for _, hash := range hashes {
+			if _, ok := tInfoByHash[hash]; ok {
+				trimmedHashes = append(trimmedHashes, hash)
+			}
+		}
+		hashes = trimmedHashes
 	}
 
 	filesByHashes, err := torrent_stream.GetFilesByHashes(hashes)
@@ -747,29 +832,39 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var wg sync.WaitGroup
-
-	var wrappedStreams []WrappedStream
-	var getStreamsError error
-	wg.Go(func() {
-		wrappedStreams, getStreamsError = GetStreamsForHashes(contentType, id, hashes, nsid)
-	})
+	wrappedStreams, getStreamsError := GetStreamsForHashes(contentType, id, hashes, nsid)
+	if getStreamsError != nil {
+		SendError(w, r, getStreamsError)
+		return
+	}
 
 	var wrappedStreamsFromIndexers []WrappedStream
 	var hashesFromIndexers []string
 	var getStreamsFromIndexersError error
-	wg.Go(func() {
+	// Confirmed live (2026-09-14): a real-world test showed popular titles
+	// taking 45-60s+ because this live search ran and was waited on even
+	// when the cache read above had already turned up plenty of streams -
+	// the request was held hostage by a search it didn't need. If the
+	// cache already has something, return it immediately and run the live
+	// search detached in the background instead, purely to keep the cache
+	// fresh for next time; GetStreamsFromIndexers persists whatever it
+	// finds via its own upsert regardless of whether anything reads its
+	// return value, so nothing is lost by not waiting on it here. A
+	// stremId with no cached hashes at all (first-ever search) still
+	// waits, since live search is the only source of results for it.
+	if len(wrappedStreams) > 0 {
+		go func() {
+			timeoutCtx, cancel := context.WithTimeout(context.Background(), config.Stremio.Torz.IndexerMaxTimeout)
+			defer cancel()
+			if _, _, err := GetStreamsFromIndexers(timeoutCtx, ctx, contentType, id); err != nil {
+				log.Error("failed to fetch live torz streams (background refresh)", "error", err)
+			}
+		}()
+	} else {
 		timeoutCtx, cancel := context.WithTimeout(r.Context(), config.Stremio.Torz.IndexerMaxTimeout)
-		defer cancel()
 		wrappedStreamsFromIndexers, hashesFromIndexers, getStreamsFromIndexersError = GetStreamsFromIndexers(timeoutCtx, ctx, contentType, id)
+		cancel()
 		log.Debug("fetched streams from indexers", "count", len(wrappedStreamsFromIndexers))
-	})
-
-	wg.Wait()
-
-	if getStreamsError != nil {
-		SendError(w, r, getStreamsError)
-		return
 	}
 
 	if getStreamsFromIndexersError != nil {
