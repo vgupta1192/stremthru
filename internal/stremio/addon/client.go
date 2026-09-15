@@ -212,9 +212,20 @@ var fetchStreamGroup singleflight.Group
 // just magnet hashes) - those can go stale on the upstream's own side, so
 // this favors staying fresh over maximizing hit rate. Only successful (200)
 // responses are cached; errors/timeouts always retry live next time.
+//
+// Raised from 7 minutes to 8 hours (2026-09-15): confirmed live that the
+// catalog_warmer.py background warmer only re-touches each title every 3
+// days, so a 7-minute window meant almost every actual click - even on a
+// title the warmer had just "cached" - still paid one live Torrentio
+// fetch (confirmed live: ~14.6s for one such fetch) before this cache
+// caught up for the rest of that viewing session. For a personal single-
+// user seedbox the staleness risk this guards against (a cached
+// Torrentio stream URL going dead on Torrentio's own side) is low enough
+// that trading some freshness for actually-consistent speed across a
+// normal viewing session/day is the better default.
 var fetchStreamCache = cache.NewCache[request.APIResponse[stremio.StreamHandlerResponse]](&cache.CacheConfig{
 	Name:     "stremio_addon:fetch_stream",
-	Lifetime: 7 * time.Minute,
+	Lifetime: 8 * time.Hour,
 	MaxSize:  8192,
 })
 
