@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -254,7 +255,25 @@ func BulkTouch(storeCode store.StoreCode, filesByHash map[string]torrent_stream.
 	hitCacheKeys := []string{}
 	missCacheKeys := []string{}
 
-	for hash, is_cached := range cached {
+	// Go map iteration order is randomized per call. With it, two concurrent
+	// BulkTouch calls touching an overlapping set of hashes (routine here -
+	// CheckMagnet runs in parallel across every configured debrid store per
+	// request, and popular titles draw many near-simultaneous requests) each
+	// build their multi-row "INSERT ... VALUES (...),(...),..." with rows in
+	// a different order. Postgres acquires row locks in VALUES order within
+	// a single statement, so if txn A locks hashX then waits on hashY while
+	// txn B locks hashY then waits on hashX, that's a deadlock (observed
+	// live as "failed to touch hits" / SQLSTATE 40P01). Sorting the hashes
+	// first makes every concurrent call take locks in the same order, so
+	// they queue instead of circularly waiting on each other.
+	hashes := make([]string, 0, len(cached))
+	for hash := range cached {
+		hashes = append(hashes, hash)
+	}
+	sort.Strings(hashes)
+
+	for _, hash := range hashes {
+		is_cached := cached[hash]
 		cacheKey := writeCacheKey(storeCode, hash)
 		var prevIsCached bool
 		if prevIsCachedCache.Get(cacheKey, &prevIsCached) && prevIsCached == is_cached {
