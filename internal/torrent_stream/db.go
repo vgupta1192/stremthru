@@ -346,9 +346,33 @@ func GetFile(hash string, sid string) (*File, error) {
 	return &file, nil
 }
 
+// Lifetime raised from 2h to 90d (2026-09-16), matching the same fix
+// already applied to fetchStreamCache in stremio/addon/client.go - a
+// cache miss here means a real per-hash file-lookup query against
+// torrent_stream, which is genuinely expensive under this host's shared-
+// disk contention (confirmed live: Avatar, tt0499549, only 381 known
+// hashes, took 22.3s on a cold miss vs 0.4s immediately after on a warm
+// hit - same data, same request, only difference was this cache).
+// Correctness doesn't depend on the TTL: every call site that changes a
+// hash's underlying file data already explicitly invalidates it via
+// filesByHashCache.Remove(hash) (see below), so a long-lived entry can't
+// go stale in a way this cache wouldn't already know to evict.
+//
+// This backs onto the plain in-process LRU, not Redis - confirmed
+// STREMTHRU_REDIS_URI isn't set anywhere in this deployment's config, so
+// redis.IsAvailable() is false and NewCache falls through to
+// NewLRUCache. That means MaxSize (not a Redis maxmemory policy) is what
+// actually bounds growth here - freelru evicts truly-least-recently-used
+// entries once the 400,000-entry cap is hit, same self-limiting effect,
+// just enforced in-process. It also means this cache does NOT survive a
+// stremthru restart (in-process memory, wiped on every deploy) - unlike
+// a Redis-backed cache would. Every code deploy this session has reset
+// it, which is a real contributor to "even a popular title is slow
+// again" complaints right after any restart - worth remembering the next
+// time that comes up, since it's easy to misattribute to something else.
 var filesByHashCache = cache.NewCache[Files](&cache.CacheConfig{
 	Name:     "torrent_stream:files_by_hash",
-	Lifetime: 2 * time.Hour,
+	Lifetime: 90 * 24 * time.Hour,
 	MaxSize:  400_000,
 })
 
