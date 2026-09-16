@@ -170,9 +170,19 @@ func (ud UserData) fetchStream(ctx *Ctx, r *http.Request, rType, id string) (*st
 					go func() {
 						timeoutCtx, cancel := context.WithTimeout(context.Background(), config.Stremio.Torz.IndexerMaxTimeout)
 						defer cancel()
-						if _, _, err := stremio_torz.GetStreamsFromIndexers(timeoutCtx, bgCtx, rType, stremId); err != nil {
+						start := time.Now()
+						bgStreams, bgHashes, err := stremio_torz.GetStreamsFromIndexers(timeoutCtx, bgCtx, rType, stremId)
+						if err != nil {
 							log.Error("failed to fetch live torz streams (background refresh)", "error", err)
+							return
 						}
+						// Only logging site for this path (2026-09-16) -
+						// GetStreamsFromIndexers itself is silent on
+						// success, so without this there was no way to
+						// tell "ran and found nothing new" apart from
+						// "never ran at all" from the logs alone. Directly
+						// caused real confusion diagnosing skip_live_torz.
+						log.Info("background torz refresh done", "strem_id", stremId, "streams", len(bgStreams), "hashes", len(bgHashes), "duration", time.Since(start))
 					}()
 				}
 				if len(streams) > 0 {
