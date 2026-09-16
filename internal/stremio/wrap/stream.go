@@ -130,7 +130,7 @@ func (ud UserData) fetchStream(ctx *Ctx, r *http.Request, rType, id string) (*st
 			// skip_live; the synchronous first-ever-search branch always
 			// runs regardless, matching what its own comment below already
 			// promised.
-			if len(ctx.Indexers) > 0 && !ud.SkipLiveTorz {
+			if len(ctx.Indexers) > 0 {
 				// Confirmed live (2026-09-14): a 15-title real-world test
 				// showed several popular titles taking 45-60s+ because this
 				// live search ran and was waited on even when the cache
@@ -142,20 +142,43 @@ func (ud UserData) fetchStream(ctx *Ctx, r *http.Request, rType, id string) (*st
 				// next time; GetStreamsFromIndexers persists whatever it
 				// finds via its own `go torrent_info.Upsert(...)` regardless
 				// of whether anything reads its return value, so nothing is
-				// lost by not waiting on it here. A stremId with no cached
-				// hashes at all (first-ever search) still waits, since live
-				// search is the only source of results for that request.
-				if len(streams) > 0 {
-					if r.URL.Query().Get("skip_live") != "1" {
-						bgCtx := &stremio_torz.Ctx{Ctx: ctx.Ctx, Indexers: ctx.Indexers}
-						go func() {
-							timeoutCtx, cancel := context.WithTimeout(context.Background(), config.Stremio.Torz.IndexerMaxTimeout)
-							defer cancel()
-							if _, _, err := stremio_torz.GetStreamsFromIndexers(timeoutCtx, bgCtx, rType, stremId); err != nil {
-								log.Error("failed to fetch live torz streams (background refresh)", "error", err)
-							}
-						}()
+				// lost by not waiting on it here.
+				//
+				// A stremId with no cached hashes at all (first-ever
+				// search) used to always wait on live search here, since it
+				// was the only source of results for that request - but
+				// that's exactly the case that could occasionally run the
+				// full IndexerMaxTimeout (45s) when a normally-fast indexer
+				// has a slow moment (confirmed live, 2026-09-16: jackett/
+				// uindex hit 44.7s on a real request despite testing
+				// sub-20ms in the periodic health check). skip_live_torz
+				// backgrounds this case too instead of blocking on it - the
+				// request returns immediately with whatever upstream
+				// addons (Torrentio/MediaFusion) have, and the indexer
+				// search still runs and populates the cache for the very
+				// next click on the same title, typically within seconds
+				// rather than waiting on the separately-scheduled
+				// sync-torznab-indexer job's own cadence (every 5-10min).
+				// Only a genuine cache-miss on a non-opted-in key still
+				// blocks, since live search is that request's only
+				// possible source of torz results at all.
+				bgCtx := &stremio_torz.Ctx{Ctx: ctx.Ctx, Indexers: ctx.Indexers}
+				runInBackground := func() {
+					if r.URL.Query().Get("skip_live") == "1" {
+						return
 					}
+					go func() {
+						timeoutCtx, cancel := context.WithTimeout(context.Background(), config.Stremio.Torz.IndexerMaxTimeout)
+						defer cancel()
+						if _, _, err := stremio_torz.GetStreamsFromIndexers(timeoutCtx, bgCtx, rType, stremId); err != nil {
+							log.Error("failed to fetch live torz streams (background refresh)", "error", err)
+						}
+					}()
+				}
+				if len(streams) > 0 {
+					runInBackground()
+				} else if ud.SkipLiveTorz {
+					runInBackground()
 				} else {
 					timeoutCtx, cancel := context.WithTimeout(r.Context(), config.Stremio.Torz.IndexerMaxTimeout)
 					liveStreams, _, liveErr := stremio_torz.GetStreamsFromIndexers(timeoutCtx, &stremio_torz.Ctx{Ctx: ctx.Ctx, Indexers: ctx.Indexers}, rType, stremId)
