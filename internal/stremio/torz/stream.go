@@ -359,7 +359,13 @@ waitLoop:
 		return nil, nil, err
 	}
 
-	filesByHashes, err := torrent_stream.GetFilesByHashes(hashes)
+	// GetVideoFilesByHashes (2026-09-16), not GetFilesByHashes: every use
+	// below only ever keeps a match where f.IsVideo() is true, so filtering
+	// non-video files (subs/nfo/samples/etc.) out at the SQL level instead
+	// of after fetching avoids aggregating rows this code was always going
+	// to discard - confirmed live this can be the majority of a torrent's
+	// files for a bundled/collection release.
+	filesByHashes, err := torrent_stream.GetVideoFilesByHashes(hashes)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -597,7 +603,19 @@ waitLoop:
 // healthy) and keeping the top N naturally favors well-seeded, commonly-
 // requested resolutions without needing a hardcoded resolution/language
 // allowlist that could silently hide something a user actually wants.
-const maxStreamsPerTitle = 100
+//
+// Lowered 100 -> 50 (2026-09-16): confirmed live even a mid-size title
+// (tt11145118, 418 known hashes - well under Oppenheimer's 1158) was
+// still taking 45s+ at the 100 cap, badly enough that two real client
+// requests both disconnected before the server finished ("write: broken
+// pipe" in stremthru-stderr.log, req.ids dal2ih9ato4p46t5l6f0 and
+// dal2ir9ato4p46t5l6g0). Halving the cap roughly halves the remaining
+// expensive per-hash work for exactly this worst-case pattern. Note this
+// host was also under sustained heavy disk I/O contention at the same
+// time (load average 70-95, iowait 20-67% - see watchdog/aiosports
+// investigation the same day), which is a separate, real contributor this
+// change doesn't address - so this alone may not fully close the gap.
+const maxStreamsPerTitle = 50
 
 func GetStreamsForHashes(stremType, stremId string, hashes []string, nsid *torrent_stream.NormalizedStremId) ([]WrappedStream, error) {
 	tInfoByHash, err := torrent_info.GetByHashes(hashes)
@@ -627,7 +645,13 @@ func GetStreamsForHashes(stremType, stremId string, hashes []string, nsid *torre
 		hashes = trimmedHashes
 	}
 
-	filesByHashes, err := torrent_stream.GetFilesByHashes(hashes)
+	// GetVideoFilesByHashes (2026-09-16), not GetFilesByHashes: every use
+	// below only ever keeps a match where f.IsVideo() is true, so filtering
+	// non-video files (subs/nfo/samples/etc.) out at the SQL level instead
+	// of after fetching avoids aggregating rows this code was always going
+	// to discard - confirmed live this can be the majority of a torrent's
+	// files for a bundled/collection release.
+	filesByHashes, err := torrent_stream.GetVideoFilesByHashes(hashes)
 	if err != nil {
 		return nil, err
 	}

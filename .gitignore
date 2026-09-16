@@ -3,6 +3,11 @@
 .env.*
 !.env.example
 
+## Contains real secrets (Postgres/Redis passwords, vault secret) - added
+## 2026-09-16 after finding it untracked and NOT already covered by the
+## .env patterns above (it's config/stremthru.env, not a root .env file).
+config/
+
 ## Build artifacts
 build
 dist

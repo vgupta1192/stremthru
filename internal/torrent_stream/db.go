@@ -266,6 +266,7 @@ func cleanupFilesWithNameAsPath(hash string, files Files) {
 	} else {
 		log.Debug("cleaned up files with name as path", "hash", hash)
 		filesByHashCache.Remove(hash)
+		videoFilesByHashCache.Remove(hash)
 	}
 }
 
@@ -422,6 +423,93 @@ func GetFilesByHashes(hashes []string) (map[string]Files, error) {
 			return nil, err
 		}
 		filesByHashCache.Add(hash, files)
+		byHash[hash] = files
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return byHash, nil
+}
+
+// Keep in sync with internal/util/file_ext.go's FileExtVideo - duplicated
+// here (rather than iterated from that Set[string], which has no
+// iteration method) purely to build a SQL WHERE fragment.
+var videoFileWhereClause = func() string {
+	exts := []string{
+		"3g2", "3gp", "amv", "asf", "avi", "drc", "f4a", "f4b", "f4p", "f4v",
+		"flv", "gif", "gifv", "m2ts", "m2v", "m4p", "m4v", "mk3d", "mkv", "mng",
+		"mov", "mp2", "mp4", "mpe", "mpeg", "mpg", "mpv", "mxf", "nsv", "ogg",
+		"ogm", "ogv", "qt", "rm", "rmvb", "roq", "svi", "ts", "webm", "wmv", "yuv",
+	}
+	conds := make([]string, len(exts))
+	for i, ext := range exts {
+		conds[i] = "lower(p) LIKE '%." + ext + "'"
+	}
+	return "(" + strings.Join(conds, " OR ") + ")"
+}()
+
+// Separate cache from filesByHashCache (2026-09-16) - torz/stream.go's two
+// call sites only ever keep files matching torrent_stream.File.IsVideo()
+// (core.HasVideoExtension, checked against the exact same extension list
+// as videoFileWhereClause above - see internal/util/file_ext.go), so
+// filtering server-side instead of after fetching cuts both the row count
+// json_agg has to aggregate and the bytes sent back. Confirmed live: one
+// real hash (a "2009 movies collection" bundle torrent) had 456 total file
+// rows but only 75 video files - the unfiltered aggregation of that single
+// hash alone took 3.9s in isolation, a meaningful chunk of the 22-28s cold
+// requests seen for popular/high-hash-count titles like Avatar. Kept as a
+// genuinely separate cache (not reusing filesByHashCache) because the two
+// have different content for the same hash key - mixing them would either
+// serve a stream-building call an incomplete file list cached by
+// magnet_cache's own GetFilesByHashes call (internal/magnet_cache/db.go,
+// which needs the full file list and is intentionally NOT switched to
+// this function) or vice versa.
+var videoFilesByHashCache = cache.NewCache[Files](&cache.CacheConfig{
+	Name:     "torrent_stream:video_files_by_hash",
+	Lifetime: 90 * 24 * time.Hour,
+	MaxSize:  400_000,
+})
+
+func GetVideoFilesByHashes(hashes []string) (map[string]Files, error) {
+	byHash := map[string]Files{}
+
+	if len(hashes) == 0 {
+		return byHash, nil
+	}
+
+	var missedHashes []string
+	for _, hash := range hashes {
+		var cached Files
+		if videoFilesByHashCache.Get(hash, &cached) {
+			readCacheHitCount.Add(1)
+			byHash[hash] = cached
+		} else {
+			missedHashes = append(missedHashes, hash)
+		}
+	}
+
+	if len(missedHashes) == 0 {
+		return byHash, nil
+	}
+
+	readCacheMissCount.Add(int64(len(missedHashes)))
+
+	query_in_hashes, args := db.InStringValues(missedHashes)
+
+	rows, err := db.Query("SELECT h, "+db.FnJSONGroupArray+"("+db.FnJSONObject+"('i', i, 'p', p, 's', s, 'sid', sid, 'asid', asid, 'src', src, 'vhash', vhash, 'mi', jsonb(mi))) AS files FROM "+TableName+" WHERE h "+query_in_hashes+" AND "+videoFileWhereClause+" GROUP BY h", args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		hash := ""
+		files := Files{}
+		if err := rows.Scan(&hash, &files); err != nil {
+			return nil, err
+		}
+		videoFilesByHashCache.Add(hash, files)
 		byHash[hash] = files
 	}
 
@@ -645,6 +733,7 @@ func Record(items []InsertData, discardIdx bool) error {
 				hash, _, _ := strings.Cut(key, ":")
 				if !invalidatedHashes.Has(hash) {
 					filesByHashCache.Remove(hash)
+					videoFilesByHashCache.Remove(hash)
 					invalidatedHashes.Add(hash)
 				}
 			}
@@ -685,6 +774,7 @@ func SetMediaInfo(hash, path string, mediaInfo *media_info.MediaInfo) error {
 	_, err := db.Exec(query_set_media_info, JSONBMediaInfo(mediaInfo), hash, path)
 	if err == nil {
 		filesByHashCache.Remove(hash)
+		videoFilesByHashCache.Remove(hash)
 	}
 	return err
 }
@@ -712,6 +802,7 @@ func TagStremId(hash string, filepath string, sid string) {
 	} else {
 		log.Debug("tagged strem id", "hash", hash, "fpath", filepath, "sid", sid)
 		filesByHashCache.Remove(hash)
+		videoFilesByHashCache.Remove(hash)
 	}
 }
 
@@ -754,6 +845,7 @@ func TagAnimeStremId(hash string, filepath string, sid string) {
 	} else {
 		log.Debug("tagged anime strem id", "hash", hash, "fpath", filepath, "asid", asid, "strem_id", sid)
 		filesByHashCache.Remove(hash)
+		videoFilesByHashCache.Remove(hash)
 	}
 }
 
