@@ -130,7 +130,7 @@ func (ud UserData) fetchStream(ctx *Ctx, r *http.Request, rType, id string) (*st
 			// skip_live; the synchronous first-ever-search branch always
 			// runs regardless, matching what its own comment below already
 			// promised.
-			if len(ctx.Indexers) > 0 {
+			if len(ctx.Indexers) > 0 && !ud.SkipLiveTorz {
 				// Confirmed live (2026-09-14): a 15-title real-world test
 				// showed several popular titles taking 45-60s+ because this
 				// live search ran and was waited on even when the cache

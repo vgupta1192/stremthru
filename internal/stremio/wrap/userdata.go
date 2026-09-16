@@ -77,6 +77,22 @@ type UserData struct {
 	// indexers the same way the standalone torz addon does.
 	stremio_userdata.UserDataIndexers
 
+	// Added 2026-09-16: confirmed live that a per-request live indexer
+	// search - even the backgrounded refresh run on a cache hit - can
+	// occasionally take the full IndexerMaxTimeout ceiling (45s) when a
+	// normally-fast indexer has a slow moment under host load, and that
+	// this wrap key's users would rather always get an instant cached
+	// response and let indexing stay purely a background concern (the
+	// scheduled sync-torznab-indexer/queue-torznab-indexer-sync jobs,
+	// plus the unconditional QueueJob call above, keep populating the
+	// shared cache regardless of this flag - only the per-request path is
+	// affected). When true, skips the entire live-search block below
+	// regardless of whether indexers are configured, so indexer_health_
+	// check.py can keep syncing the fastest-10 list into `indexers`
+	// (still used to display in configure UI / by other keys) without
+	// that list ever being queried live for this key.
+	SkipLiveTorz bool `json:"skip_live_torz,omitempty"`
+
 	stremio_userdata.UserDataStores
 	StoreName  string `json:"store,omitempty"`
 	StoreToken string `json:"token,omitempty"`
@@ -487,6 +503,11 @@ func getUserData(r *http.Request) (*UserData, error) {
 			data.AutoIndexers = true
 			data.Upstreams = []UserDataUpstream{
 				{URL: "https://torrentio.strem.fun/manifest.json", ReconfigureStore: true, ExtractorId: BUILTIN_TRANSFORMER_ENTITY_ID_PREFIX + "Torrentio"},
+				// Added 2026-09-14: MediaFusion runs self-hosted on this box
+				// (127.0.0.1:8210) - see mediaFusionHost in
+				// internal/torrent_info/extractor.go for why its cache
+				// persistence is matched by host:port instead of hostname.
+				{URL: "http://127.0.0.1:8210/manifest.json", ReconfigureStore: true, ExtractorId: BUILTIN_TRANSFORMER_ENTITY_ID_PREFIX + "MediaFusion"},
 			}
 			data.Sort = "-language:hi|dual audio|multi audio|en,-resolution,-quality,-size"
 			data.Filter = `(Resolution == "4k" || Resolution == "2160p" || Resolution == "1440p" || Resolution == "2k" || Resolution == "1080p" || Resolution == "")`
