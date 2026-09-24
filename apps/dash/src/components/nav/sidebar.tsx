@@ -406,6 +406,10 @@ function useNavItems(): NavItem[] {
           path: "/dash/settings/maintenance",
           title: "Maintenance",
         },
+        {
+          path: "/dash/settings/jackett",
+          title: "Jackett",
+        },
       ],
       path: "/dash/settings",
       title: "Settings",

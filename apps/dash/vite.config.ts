@@ -10,6 +10,9 @@ export default defineConfig({
     tsConfigPaths(),
     tanstackStart({
       customViteReactPlugin: true,
+      prerender: {
+        enabled: false,
+      },
       spa: {
         enabled: true,
       },

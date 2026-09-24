@@ -25,6 +25,13 @@ func GetFileHandler() http.Handler {
 		if strings.HasPrefix(r.URL.Path, "/assets/") {
 			w.Header().Set("Cache-Control", "public, max-age=86400")
 		} else {
+			// _shell.html references content-hashed asset filenames that
+			// change on every rebuild - without an explicit no-cache here,
+			// browsers can heuristically cache this response and keep
+			// loading a shell that points at assets which no longer exist
+			// after a redeploy, breaking navigation to routes the browser
+			// hadn't already fetched.
+			w.Header().Set("Cache-Control", "no-cache")
 			r.URL.Path = "_shell.html"
 		}
 		handler.ServeHTTP(w, r)

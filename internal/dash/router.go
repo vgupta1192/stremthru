@@ -46,6 +46,7 @@ func AddEndpoints(mux *http.ServeMux) {
 	dash_api.AddTorrentInfoEndpoints(router)
 	dash_api.AddTorrentReprocessEndpoint(router)
 	dash_api.AddTorznabIndexerSyncInfoEndpoints(router)
+	dash_api.AddJackettEndpoints(router)
 	dash_api.AddRateLimitEndpoints(router)
 	dash_api.AddMaintenanceEndpoints(router)
 	dash_api.AddProxyEndpoints(router)

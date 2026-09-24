@@ -64,12 +64,63 @@ func extractInputFromTorrentioStream(data *TorrentInfoInsertData, sid string, st
 	return data
 }
 
+// Added 2026-09-14: MediaFusion is self-hosted on this box rather than a
+// public well-known domain like Torrentio, so it's identified by host:port
+// (127.0.0.1:8210) instead of just a hostname - matching on bare
+// "127.0.0.1" would also catch any other locally-hosted upstream a user
+// adds later and mis-tag its results as MediaFusion's. ExtractCreateDataFromStream
+// is called with up.baseUrl.Host (not .Hostname()) specifically so this
+// port-qualified match works; Torrentio's public HTTPS URL has no explicit
+// port so its existing bare-hostname match is unaffected.
+const mediaFusionHost = "127.0.0.1:8210"
+
+func extractInputFromMediaFusionStream(data *TorrentInfoInsertData, sid string, stream *stremio.Stream) *TorrentInfoInsertData {
+	description := stream.Description
+	if description == "" {
+		description = stream.Title
+	}
+	torrentTitle, _, _ := strings.Cut(description, "\n")
+	data.TorrentTitle = torrentTitle
+
+	file := TorrentInfoInsertDataFile{
+		Idx:  -1,
+		Size: -1,
+		SId:  sid,
+	}
+
+	// Unlike Torrentio, MediaFusion populates the standard `infoHash` /
+	// `fileIdx` stream fields directly (confirmed live 2026-09-14) rather
+	// than encoding the hash into the stream URL, so no regex is needed.
+	if stream.InfoHash != "" {
+		data.Hash = stream.InfoHash
+		file.Idx = stream.FileIndex
+	}
+
+	if stream.BehaviorHints != nil {
+		if stream.BehaviorHints.Filename != "" {
+			file.Name = stream.BehaviorHints.Filename
+		}
+		if stream.BehaviorHints.VideoSize > 0 {
+			file.Size = stream.BehaviorHints.VideoSize
+		}
+	}
+
+	if file.Name != "" {
+		data.Files = append(data.Files, file)
+	}
+	data.Size = -1
+	return data
+}
+
 func ExtractCreateDataFromStream(hostname string, sid string, stream *stremio.Stream) *TorrentInfoInsertData {
 	data := &TorrentInfoInsertData{}
 	switch hostname {
 	case util.MustDecodeBase64("dG9ycmVudGlvLnN0cmVtLmZ1bg=="):
 		data.Source = TorrentInfoSourceTorrentio
 		data = extractInputFromTorrentioStream(data, sid, stream)
+	case mediaFusionHost:
+		data.Source = TorrentInfoSourceMediaFusion
+		data = extractInputFromMediaFusionStream(data, sid, stream)
 	}
 	if data.Hash == "" {
 		return nil

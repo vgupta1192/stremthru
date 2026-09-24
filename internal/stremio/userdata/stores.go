@@ -216,54 +216,33 @@ func (ud *UserDataStores) CheckMagnet(params *store.CheckMagnetParams, log *logg
 		return &res
 	}
 
-	firstStore := ms[0]
-
-	missingHashes := []string{}
-
-	cmParams := &store.CheckMagnetParams{
-		Magnets:  params.Magnets,
-		ClientIP: params.ClientIP,
-		SId:      params.SId,
-	}
-	cmParams.APIKey = firstStore.AuthToken
-	storeCode := strings.ToUpper(string(firstStore.Store.GetName().Code()))
-	if cmRes, err := firstStore.Store.CheckMagnet(cmParams); err != nil {
-		log.Warn("failed to check magnet", "error", err, "store.name", firstStore.Store.GetName())
-		res.Err[0] = err
-		res.HasErr = true
-		res.HasErrByStoreCode[storeCode] = struct{}{}
-
-		if storeCount > 1 {
-			missingHashes = params.Magnets
-		}
-	} else {
-		for i := range cmRes.Items {
-			item := cmRes.Items[i]
-			if item.Status == store.MagnetStatusCached {
-				res.ByHash[item.Hash] = storeCode
-			} else if storeCount > 1 {
-				missingHashes = append(missingHashes, item.Hash)
-			}
-		}
-	}
-
-	if storeCount == 1 || len(missingHashes) == 0 {
-		return &res
-	}
-
+	// Confirmed live (2026-09-14): store[0] was previously checked alone,
+	// fully sequentially, and only the hashes it didn't have cached were
+	// then checked against the remaining stores in parallel. For a title
+	// with thousands of candidate hashes (observed live: Interstellar,
+	// 3371 streams), this meant paying store[0]'s full check time before
+	// stores[1:] even started, dominating the whole response. All
+	// configured stores are now checked against the full hash list fully
+	// in parallel instead - trades a bit more redundant CheckMagnet volume
+	// against well-covered stores (debrid CheckMagnet endpoints are cheap,
+	// high-limit lookups, unlike torrent indexer searches) for a
+	// wall-clock time bounded by the slowest single store instead of
+	// store[0] + slowest-of-the-rest.
 	var wg sync.WaitGroup
-	for i := range storeCount - 1 {
-		idx := i + 1
+	for i := range storeCount {
+		idx := i
 		s := &ms[idx]
 
 		wg.Go(func() {
 			if s.Store == nil {
+				res.m.Lock()
 				res.Err[idx] = errors.New("invalid userdata, invalid store")
 				res.HasErr = true
+				res.m.Unlock()
 				return
 			}
 			cmParams := &store.CheckMagnetParams{
-				Magnets:  missingHashes,
+				Magnets:  params.Magnets,
 				ClientIP: params.ClientIP,
 				SId:      params.SId,
 			}
@@ -272,9 +251,11 @@ func (ud *UserDataStores) CheckMagnet(params *store.CheckMagnetParams, log *logg
 			storeCode := strings.ToUpper(string(s.Store.GetName().Code()))
 			if err != nil {
 				log.Warn("failed to check magnet", "error", err, "store.name", s.Store.GetName())
+				res.m.Lock()
 				res.Err[idx] = err
 				res.HasErr = true
 				res.HasErrByStoreCode[storeCode] = struct{}{}
+				res.m.Unlock()
 			} else {
 				res.m.Lock()
 				defer res.m.Unlock()
@@ -322,61 +303,35 @@ func (ud *UserDataStores) CheckNewz(params *store.CheckNewzParams, log *logger.L
 		return &res
 	}
 
-	firstStore := ms[0]
-
-	missingHashes := []string{}
-
-	cnParams := &store.CheckNewzParams{
-		Hashes: params.Hashes,
-	}
-	cnParams.APIKey = firstStore.AuthToken
-	storeCode := strings.ToUpper(string(firstStore.Store.GetName().Code()))
-	if cnRes, err := firstStore.Store.(store.NewzStore).CheckNewz(cnParams); err != nil {
-		log.Warn("failed to check magnet", "error", err, "store.name", firstStore.Store.GetName())
-		res.Err[0] = err
-		res.HasErr = true
-		res.HasErrByStoreCode.Add(storeCode)
-
-		if storeCount > 1 {
-			missingHashes = params.Hashes
-		}
-	} else {
-		for i := range cnRes.Items {
-			item := cnRes.Items[i]
-			if item.Status == store.NewzStatusCached {
-				res.ByHash[item.Hash] = storeCode
-			} else if storeCount > 1 {
-				missingHashes = append(missingHashes, item.Hash)
-			}
-		}
-	}
-
-	if storeCount == 1 || len(missingHashes) == 0 {
-		return &res
-	}
-
+	// See the matching comment in CheckMagnet (2026-09-14) - same fix,
+	// same reasoning: check all configured newz-capable stores against the
+	// full hash list fully in parallel instead of store[0] alone first.
 	var wg sync.WaitGroup
-	for i := range storeCount - 1 {
-		idx := i + 1
+	for i := range storeCount {
+		idx := i
 		s := &ms[idx]
 
 		wg.Go(func() {
 			if s.Store == nil {
+				res.m.Lock()
 				res.Err[idx] = errors.New("invalid userdata, invalid store")
 				res.HasErr = true
+				res.m.Unlock()
 				return
 			}
 			cnParams := &store.CheckNewzParams{
-				Hashes: missingHashes,
+				Hashes: params.Hashes,
 			}
 			cnParams.APIKey = s.AuthToken
 			cnRes, err := s.Store.(store.NewzStore).CheckNewz(cnParams)
 			storeCode := strings.ToUpper(string(s.Store.GetName().Code()))
 			if err != nil {
 				log.Warn("failed to check magnet", "error", err, "store.name", s.Store.GetName())
+				res.m.Lock()
 				res.Err[idx] = err
 				res.HasErr = true
 				res.HasErrByStoreCode.Add(storeCode)
+				res.m.Unlock()
 			} else {
 				res.m.Lock()
 				defer res.m.Unlock()

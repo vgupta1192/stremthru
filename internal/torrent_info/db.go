@@ -601,10 +601,8 @@ var query_get_by_hashes = fmt.Sprintf(
 )
 
 func GetByHashes(hashes []string) (map[string]TorrentInfo, error) {
-	byHash := map[string]TorrentInfo{}
-
 	if len(hashes) == 0 {
-		return byHash, nil
+		return map[string]TorrentInfo{}, nil
 	}
 
 	query_in_hashes, args := db.InStringValues(hashes)
@@ -614,6 +612,43 @@ func GetByHashes(hashes []string) (map[string]TorrentInfo, error) {
 		return nil, err
 	}
 	defer rows.Close()
+
+	return scanTorrentInfoRows(rows)
+}
+
+// Added 2026-09-19: same rows as GetByHashes, but ranked by seeders and
+// capped in SQL. Callers that only ever keep the top-N by seeders (see the
+// maxStreamsPerTitle trimming in stremio/torz GetStreamsForHashes) used to
+// fetch EVERY torrent_info row for a title - all ~52 columns of each - and
+// discard most of them in Go. On this seedbox that was fatal for cold
+// clicks: /home14 is a shared HDD at 75-90% util with 10-80ms per uncached
+// page read (vmstat iowait 50%+), torrent_info's heap cache-hit ratio
+// measured 44% with 49M disk block reads, so a popular title's few hundred
+// scattered wide rows cost tens of seconds of pure random-read I/O that the
+// request then threw away. Ranking + limiting inside the DB means only the
+// rows that survive the trim are ever read off disk.
+func GetByHashesRanked(hashes []string, limit int) (map[string]TorrentInfo, error) {
+	if len(hashes) == 0 || limit <= 0 {
+		return map[string]TorrentInfo{}, nil
+	}
+
+	query_in_hashes, args := db.InStringValues(hashes)
+	args = append(args, limit)
+	query := fmt.Sprintf(
+		"%s %s ORDER BY %s DESC LIMIT ?",
+		query_get_by_hashes, query_in_hashes, Column.Seeders,
+	)
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return scanTorrentInfoRows(rows)
+}
+
+func scanTorrentInfoRows(rows *sql.Rows) (map[string]TorrentInfo, error) {
+	byHash := map[string]TorrentInfo{}
 
 	for rows.Next() {
 		tInfo := TorrentInfo{}

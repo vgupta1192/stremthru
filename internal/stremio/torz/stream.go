@@ -618,31 +618,33 @@ waitLoop:
 const maxStreamsPerTitle = 50
 
 func GetStreamsForHashes(stremType, stremId string, hashes []string, nsid *torrent_stream.NormalizedStremId) ([]WrappedStream, error) {
-	tInfoByHash, err := torrent_info.GetByHashes(hashes)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(tInfoByHash) > maxStreamsPerTitle {
-		ranked := make([]string, 0, len(tInfoByHash))
-		for hash := range tInfoByHash {
-			ranked = append(ranked, hash)
+	// Changed 2026-09-19: when the title has more hashes than
+	// maxStreamsPerTitle, the rank-by-seeders + trim now happens inside the
+	// DB (GetByHashesRanked) instead of fetching every row and discarding
+	// most of them in Go. On this box that difference is seconds-to-minutes
+	// of random HDD I/O on a cold title - see the comment on
+	// GetByHashesRanked. Semantics are unchanged: same top-N by seeders
+	// (ties broken arbitrarily, as before), and `hashes` keeps the original
+	// ListHashesByStremId order restricted to the kept rows.
+	var tInfoByHash map[string]torrent_info.TorrentInfo
+	var err error
+	if len(hashes) > maxStreamsPerTitle {
+		tInfoByHash, err = torrent_info.GetByHashesRanked(hashes, maxStreamsPerTitle)
+		if err != nil {
+			return nil, err
 		}
-		slices.SortFunc(ranked, func(a, b string) int {
-			return tInfoByHash[b].Seeders - tInfoByHash[a].Seeders
-		})
-		keep := make(map[string]torrent_info.TorrentInfo, maxStreamsPerTitle)
-		for _, hash := range ranked[:maxStreamsPerTitle] {
-			keep[hash] = tInfoByHash[hash]
-		}
-		tInfoByHash = keep
-		trimmedHashes := make([]string, 0, len(hashes))
+		trimmedHashes := make([]string, 0, len(tInfoByHash))
 		for _, hash := range hashes {
 			if _, ok := tInfoByHash[hash]; ok {
 				trimmedHashes = append(trimmedHashes, hash)
 			}
 		}
 		hashes = trimmedHashes
+	} else {
+		tInfoByHash, err = torrent_info.GetByHashes(hashes)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// GetVideoFilesByHashes (2026-09-16), not GetFilesByHashes: every use

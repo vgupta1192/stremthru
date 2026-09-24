@@ -23,7 +23,15 @@ var DefaultHTTPClient = func() *http.Client {
 	transport := config.DefaultHTTPTransport.Clone()
 	return &http.Client{
 		Transport: transport,
-		Timeout:   30 * time.Second,
+		// Lowered 2026-09-19 from 30s: wrap stream requests fetch every
+		// configured upstream addon in parallel and wait for ALL of them
+		// (wg.Wait in wrap/stream.go) before running CheckMagnet, so one
+		// slow public addon (Torrentio stalls/rate-limits regularly) held
+		// every click hostage for up to 30s. Upstream addons are re-fetched
+		// live on every click, so an addon that can't answer in 15s just
+		// contributes nothing to THIS click and its results appear on the
+		// next one - the right trade for interactive link lists.
+		Timeout: 15 * time.Second,
 	}
 }()
 
@@ -223,9 +231,22 @@ var fetchStreamGroup singleflight.Group
 // Torrentio stream URL going dead on Torrentio's own side) is low enough
 // that trading some freshness for actually-consistent speed across a
 // normal viewing session/day is the better default.
+//
+// Raised 8h -> 24h (2026-09-19, third pass): with the wrap's bounded 4s
+// collect, a cold-at-click-time upstream (MediaFusion cold scrape measured
+// 18.75s live) simply doesn't make the window, so first clicks showed
+// almost exclusively Torrentio links (measured 108/111 on a trending
+// title) whenever the warmer's last touch was >8h old - i.e. nearly
+// always under the warmer's multi-day refresh cadence. 24h aligns this
+// cache with the warmer's new daily cadence (refresh-days=1), so a
+// warmed title stays balanced across ALL sources for the whole interval
+// between warmer runs. Staleness trade is the same one already accepted
+// in 2026-09-15, just at daily rather than hourly scale; MediaFusion's
+// own stream URLs are self-hosted and stable, and Torrentio's are
+// re-wrapped through stremthru's proxy at play time anyway.
 var fetchStreamCache = cache.NewCache[request.APIResponse[stremio.StreamHandlerResponse]](&cache.CacheConfig{
 	Name:     "stremio_addon:fetch_stream",
-	Lifetime: 8 * time.Hour,
+	Lifetime: 24 * time.Hour,
 	MaxSize:  8192,
 })
 

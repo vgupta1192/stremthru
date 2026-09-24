@@ -40,6 +40,7 @@ import { Route as DashSyncStremioTraktRouteImport } from './routes/dash/sync/str
 import { Route as DashSyncStremioStremioRouteImport } from './routes/dash/sync/stremio-stremio'
 import { Route as DashSettingsRatelimitConfigsRouteImport } from './routes/dash/settings/ratelimit-configs'
 import { Route as DashSettingsMaintenanceRouteImport } from './routes/dash/settings/maintenance'
+import { Route as DashSettingsJackettRouteImport } from './routes/dash/settings/jackett'
 import { Route as DashSettingsConfigRouteImport } from './routes/dash/settings/config'
 
 const DashRoute = DashRouteImport.update({
@@ -200,6 +201,11 @@ const DashSettingsMaintenanceRoute = DashSettingsMaintenanceRouteImport.update({
   path: '/maintenance',
   getParentRoute: () => DashSettingsRoute,
 } as any)
+const DashSettingsJackettRoute = DashSettingsJackettRouteImport.update({
+  id: '/jackett',
+  path: '/jackett',
+  getParentRoute: () => DashSettingsRoute,
+} as any)
 const DashSettingsConfigRoute = DashSettingsConfigRouteImport.update({
   id: '/config',
   path: '/config',
@@ -219,6 +225,7 @@ export interface FileRoutesByFullPath {
   '/dash/workers': typeof DashWorkersRoute
   '/dash/': typeof DashIndexRoute
   '/dash/settings/config': typeof DashSettingsConfigRoute
+  '/dash/settings/jackett': typeof DashSettingsJackettRoute
   '/dash/settings/maintenance': typeof DashSettingsMaintenanceRoute
   '/dash/settings/ratelimit-configs': typeof DashSettingsRatelimitConfigsRoute
   '/dash/sync/stremio-stremio': typeof DashSyncStremioStremioRoute
@@ -246,6 +253,7 @@ export interface FileRoutesByTo {
   '/dash/workers': typeof DashWorkersRoute
   '/dash': typeof DashIndexRoute
   '/dash/settings/config': typeof DashSettingsConfigRoute
+  '/dash/settings/jackett': typeof DashSettingsJackettRoute
   '/dash/settings/maintenance': typeof DashSettingsMaintenanceRoute
   '/dash/settings/ratelimit-configs': typeof DashSettingsRatelimitConfigsRoute
   '/dash/sync/stremio-stremio': typeof DashSyncStremioStremioRoute
@@ -281,6 +289,7 @@ export interface FileRoutesById {
   '/dash/workers': typeof DashWorkersRoute
   '/dash/': typeof DashIndexRoute
   '/dash/settings/config': typeof DashSettingsConfigRoute
+  '/dash/settings/jackett': typeof DashSettingsJackettRoute
   '/dash/settings/maintenance': typeof DashSettingsMaintenanceRoute
   '/dash/settings/ratelimit-configs': typeof DashSettingsRatelimitConfigsRoute
   '/dash/sync/stremio-stremio': typeof DashSyncStremioStremioRoute
@@ -317,6 +326,7 @@ export interface FileRouteTypes {
     | '/dash/workers'
     | '/dash/'
     | '/dash/settings/config'
+    | '/dash/settings/jackett'
     | '/dash/settings/maintenance'
     | '/dash/settings/ratelimit-configs'
     | '/dash/sync/stremio-stremio'
@@ -344,6 +354,7 @@ export interface FileRouteTypes {
     | '/dash/workers'
     | '/dash'
     | '/dash/settings/config'
+    | '/dash/settings/jackett'
     | '/dash/settings/maintenance'
     | '/dash/settings/ratelimit-configs'
     | '/dash/sync/stremio-stremio'
@@ -378,6 +389,7 @@ export interface FileRouteTypes {
     | '/dash/workers'
     | '/dash/'
     | '/dash/settings/config'
+    | '/dash/settings/jackett'
     | '/dash/settings/maintenance'
     | '/dash/settings/ratelimit-configs'
     | '/dash/sync/stremio-stremio'
@@ -623,6 +635,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DashSettingsMaintenanceRouteImport
       parentRoute: typeof DashSettingsRoute
     }
+    '/dash/settings/jackett': {
+      id: '/dash/settings/jackett'
+      path: '/jackett'
+      fullPath: '/dash/settings/jackett'
+      preLoaderRoute: typeof DashSettingsJackettRouteImport
+      parentRoute: typeof DashSettingsRoute
+    }
     '/dash/settings/config': {
       id: '/dash/settings/config'
       path: '/config'
@@ -647,6 +666,7 @@ const DashListsRouteWithChildren = DashListsRoute._addFileChildren(
 
 interface DashSettingsRouteChildren {
   DashSettingsConfigRoute: typeof DashSettingsConfigRoute
+  DashSettingsJackettRoute: typeof DashSettingsJackettRoute
   DashSettingsMaintenanceRoute: typeof DashSettingsMaintenanceRoute
   DashSettingsRatelimitConfigsRoute: typeof DashSettingsRatelimitConfigsRoute
   DashSettingsIndexRoute: typeof DashSettingsIndexRoute
@@ -654,6 +674,7 @@ interface DashSettingsRouteChildren {
 
 const DashSettingsRouteChildren: DashSettingsRouteChildren = {
   DashSettingsConfigRoute: DashSettingsConfigRoute,
+  DashSettingsJackettRoute: DashSettingsJackettRoute,
   DashSettingsMaintenanceRoute: DashSettingsMaintenanceRoute,
   DashSettingsRatelimitConfigsRoute: DashSettingsRatelimitConfigsRoute,
   DashSettingsIndexRoute: DashSettingsIndexRoute,

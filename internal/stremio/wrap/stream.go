@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/MunifTanjim/stremthru/core"
@@ -51,8 +50,6 @@ func (ud UserData) fetchStream(ctx *Ctx, r *http.Request, rType, id string) (*st
 	if ud.IncludeTorz {
 		chunksCount += 1
 	}
-	chunks := make([][]WrappedStream, chunksCount)
-	errs := make([]error, chunksCount)
 
 	template, err := ud.template.Parse()
 	if err != nil {
@@ -79,28 +76,60 @@ func (ud UserData) fetchStream(ctx *Ctx, r *http.Request, rType, id string) (*st
 	}
 
 	chunkIdxOffset := 0
-	var wg sync.WaitGroup
+	// Added 2026-09-19: upstream fetches now hand their result back through a
+	// channel and the request only waits a bounded window (below) for them.
+	// Previously wg.Wait() held every link click hostage to the slowest
+	// source - confirmed live on a cold title: MediaFusion's first scrape
+	// exceeded the HTTP timeout, the request waited the full 15s for it,
+	// and it still contributed nothing ("failed to fetch streams ... context
+	// deadline exceeded"), before CheckMagnet even started. With the
+	// channel+deadline, stragglers are simply skipped for THIS response -
+	// their goroutine keeps running to completion (on a detached context),
+	// and a successful fetch still populates FetchStream's 8h response
+	// cache (and torrent_info upserts), so the very next click on the same
+	// title gets those results instantly. Skipped chunks are simply absent
+	// from that first response.
+	type chunkResult struct {
+		idx     int
+		streams []WrappedStream
+		err     error
+	}
+	chunks := make([]chunkResult, chunksCount)
+	chunkResults := make(chan chunkResult, chunksCount)
+	// How long the response waits for all sources to come back. Generous
+	// enough that warm/fast sources always make it (measured: torz cache
+	// read ~10ms, Torrentio warm ~1-3s, MediaFusion warm sub-second), tight
+	// enough that a genuinely stalled source costs seconds, not minutes.
+	// Lowered 6s -> 4s (2026-09-19, second pass): with the deadline at 6s
+	// the worst-case cold click measured ~25s (6s wait + 15s CheckMagnet
+	// chunk deadline + overhead) - the wait itself was pure dead time for
+	// sources that had already missed the window.
+	upstreamCollectDeadline := 4 * time.Second
+	deliverChunk := func(idx int, streams []WrappedStream, err error) {
+		chunkResults <- chunkResult{idx: idx, streams: streams, err: err}
+	}
 	if ud.IncludeTorz {
 		chunkIdxOffset = 1
-		wg.Go(func() {
-
+		go func() {
 			hashes, err := torrent_info.ListHashesByStremId(stremId)
 			if err != nil {
 				if errors.Is(err, torrent_stream.ErrUnsupportedStremId) {
+					deliverChunk(0, nil, nil)
 					return
 				}
 
-				errs[0] = err
+				deliverChunk(0, nil, err)
 				return
 			}
 
 			if nsid == nil {
+				deliverChunk(0, nil, nil)
 				return
 			}
 
 			streams, err := stremio_torz.GetStreamsForHashes(rType, stremId, hashes, nsid)
 			if err != nil {
-				errs[0] = err
+				deliverChunk(0, nil, err)
 				return
 			}
 
@@ -211,7 +240,7 @@ func (ud UserData) fetchStream(ctx *Ctx, r *http.Request, rType, id string) (*st
 				}
 				s, err := tmpl.Execute(stream, wstream.R)
 				if err != nil {
-					errs[0] = err
+					deliverChunk(0, nil, err)
 					return
 				}
 				wstreams[i] = WrappedStream{
@@ -219,53 +248,61 @@ func (ud UserData) fetchStream(ctx *Ctx, r *http.Request, rType, id string) (*st
 					r:      wstream.R,
 				}
 			}
-			chunks[0] = wstreams
-		})
+			deliverChunk(0, wstreams, nil)
+		}()
 	}
 	for i := range upstreams {
 		idx := i + chunkIdxOffset
-		wg.Go(func() {
+		go func() {
 			up := &upstreams[i]
-			res, err := addon.FetchStream(&stremio_addon.FetchStreamParams{
+			// Detached context (2026-09-19): this fetch must be able to
+			// outlive the HTTP request that started it - when the request's
+			// 6s collect window expires, the goroutine keeps running so its
+			// successful response still lands in FetchStream's cache for
+			// the next click. 45s is a hard stop well inside reason.
+			fetchCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			defer cancel()
+			fetchParams := &stremio_addon.FetchStreamParams{
 				BaseURL:  up.baseUrl,
 				Type:     rType,
 				Id:       id,
 				ClientIP: ctx.ClientIP,
-			})
+			}
+			fetchParams.Context = fetchCtx
+			res, err := addon.FetchStream(fetchParams)
 			streams := res.Data.Streams
 			wstreams := make([]WrappedStream, len(streams))
-			errs[idx] = err
 			tInfos := []torrent_info.TorrentInfoInsertData{}
 			if err == nil {
 				extractor, err := up.extractor.Parse()
 				if err != nil {
-					errs[idx] = err
-				} else {
-					// .Host (not .Hostname()) so self-hosted upstreams on a
-					// non-default port (MediaFusion, 127.0.0.1:8210) are
-					// identified precisely - see the comment on
-					// mediaFusionHost in torrent_info/extractor.go.
-					addonHostname := up.baseUrl.Host
-					transformer := StreamTransformer{
-						Extractor: extractor,
-						Template:  template,
+					deliverChunk(idx, nil, err)
+					return
+				}
+				// .Host (not .Hostname()) so self-hosted upstreams on a
+				// non-default port (MediaFusion, 127.0.0.1:8210) are
+				// identified precisely - see the comment on
+				// mediaFusionHost in torrent_info/extractor.go.
+				addonHostname := up.baseUrl.Host
+				transformer := StreamTransformer{
+					Extractor: extractor,
+					Template:  template,
+				}
+				for i := range streams {
+					stream := streams[i]
+					if isImdbStremId {
+						if cData := torrent_info.ExtractCreateDataFromStream(addonHostname, stremId, &stream); cData != nil {
+							tInfos = append(tInfos, *cData)
+						}
 					}
-					for i := range streams {
-						stream := streams[i]
-						if isImdbStremId {
-							if cData := torrent_info.ExtractCreateDataFromStream(addonHostname, stremId, &stream); cData != nil {
-								tInfos = append(tInfos, *cData)
-							}
-						}
-						wstream, err := transformer.Do(&stream, rType, up.ReconfigureStore)
-						if err != nil {
-							LogError(r, "failed to transform stream", err)
-						}
-						if up.NoContentProxy {
-							wstream.noContentProxy = true
-						}
-						wstreams[i] = *wstream
+					wstream, err := transformer.Do(&stream, rType, up.ReconfigureStore)
+					if err != nil {
+						LogError(r, "failed to transform stream", err)
 					}
+					if up.NoContentProxy {
+						wstream.noContentProxy = true
+					}
+					wstreams[i] = *wstream
 				}
 			}
 			if isImdbStremId {
@@ -274,26 +311,37 @@ func (ud UserData) fetchStream(ctx *Ctx, r *http.Request, rType, id string) (*st
 				}
 				go torrent_info.Upsert(tInfos, torrentInfoCategory, false)
 			}
-			chunks[idx] = wstreams
-		})
+			deliverChunk(idx, wstreams, err)
+		}()
 	}
-	wg.Wait()
+
+	received := 0
+	collectDeadline := time.After(upstreamCollectDeadline)
+	for received < chunksCount {
+		select {
+		case res := <-chunkResults:
+			chunks[res.idx] = res
+			received++
+		case <-collectDeadline:
+			received = chunksCount
+		}
+	}
 
 	allStreams := []WrappedStream{}
 	if ud.IncludeTorz {
-		if errs[0] != nil {
-			log.Error("failed to fetch torz streams", "error", errs[0])
+		if chunks[0].err != nil {
+			log.Error("failed to fetch torz streams", "error", chunks[0].err)
 		} else {
-			allStreams = append(allStreams, chunks[0]...)
+			allStreams = append(allStreams, chunks[0].streams...)
 		}
 	}
-	for i := range chunks[chunkIdxOffset:] {
+	for i := range upstreams {
 		idx := i + chunkIdxOffset
 		hostname := upstreams[i].baseUrl.Hostname()
-		if errs[idx] != nil {
-			log.Error("failed to fetch streams", "error", errs[idx], "hostname", hostname)
+		if chunks[idx].err != nil {
+			log.Error("failed to fetch streams", "error", chunks[idx].err, "hostname", hostname)
 		} else {
-			allStreams = append(allStreams, chunks[idx]...)
+			allStreams = append(allStreams, chunks[idx].streams...)
 		}
 	}
 

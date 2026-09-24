@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/MunifTanjim/stremthru/core"
@@ -157,20 +158,68 @@ func (c *StoreClient) CheckMagnet(params *store.CheckMagnetParams) (*store.Check
 
 	tByHash := map[string]CheckTorrentsCachedDataItem{}
 	if len(missingHashes) > 0 {
-		ctcParams := &CheckTorrentsCachedParams{
-			Hashes:    missingHashes,
-			ListFiles: true,
+		// Added 2026-09-19: previously the entire missing-hash list went out
+		// in a single checkcached POST with list_files=true. For a popular
+		// title that list can be hundreds to 1000+ hashes, and one payload
+		// that size takes TorBox long enough (observed live: >60s, long past
+		// the point the client gave up) that the whole stream response hung
+		// on it. Chunk the list and run the chunks with bounded parallelism:
+		// wall-clock drops to roughly the slowest single chunk, and a failed
+		// chunk no longer fails the whole CheckMagnet - those hashes just
+		// come back status=unknown (rendered as uncached, same as a store
+		// hiccup) and get re-checked on the next request.
+		const checkCachedChunkSize = 100
+		const checkCachedMaxConcurrentChunks = 4
+
+		chunks := [][]string{}
+		for i := 0; i < len(missingHashes); i += checkCachedChunkSize {
+			end := i + checkCachedChunkSize
+			if end > len(missingHashes) {
+				end = len(missingHashes)
+			}
+			chunks = append(chunks, missingHashes[i:end])
 		}
-		ctcParams.APIKey = params.APIKey
+
 		start := time.Now()
-		res, err := c.client.CheckTorrentsCached(ctcParams)
-		stats.Record(c.Name, "check_torz", time.Since(start), err != nil)
-		if err != nil {
-			return nil, err
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, checkCachedMaxConcurrentChunks)
+		for _, chunk := range chunks {
+			wg.Add(1)
+			go func(chunk []string) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				ctcParams := &CheckTorrentsCachedParams{
+					Hashes:    chunk,
+					ListFiles: true,
+				}
+				ctcParams.APIKey = params.APIKey
+				// Each chunk gets its own deadline instead of the 90s
+				// DefaultHTTPClient timeout. 15s -> 8s (2026-09-19, second
+				// pass): measured worst-case cold click was ~25s with the
+				// 15s deadline - it was the binding constraint after the
+				// upstream-wait cap. A chunk that can't answer in 8s leaves
+				// its hashes status=unknown (shown as uncached, playable)
+				// and the next click re-checks them from magnet_cache.
+				chunkClient := *c.client
+				chunkClient.HTTPClient = &http.Client{
+					Transport: c.client.HTTPClient.Transport,
+					Timeout:   8 * time.Second,
+				}
+				res, err := chunkClient.CheckTorrentsCached(ctcParams)
+				mu.Lock()
+				defer mu.Unlock()
+				stats.Record(c.Name, "check_torz", time.Since(start), err != nil)
+				if err != nil {
+					return
+				}
+				for _, t := range res.Data {
+					tByHash[strings.ToLower(t.Hash)] = t
+				}
+			}(chunk)
 		}
-		for _, t := range res.Data {
-			tByHash[strings.ToLower(t.Hash)] = t
-		}
+		wg.Wait()
 	}
 	data := &store.CheckMagnetData{
 		Items: []store.CheckMagnetDataItem{},
